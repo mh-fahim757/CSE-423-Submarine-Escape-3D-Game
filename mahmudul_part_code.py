@@ -1,0 +1,418 @@
+# Submarine Escape Game
+from OpenGL.GL import *
+from OpenGL.GLUT import *
+from OpenGL.GLU import *
+import math, random
+
+window_width, window_height = 1000, 800
+arena_size = 30
+
+# Depth Pressure Challenge
+safe_depth = -100.0          # depth where pressure starts (y-axis, usually negative for underwater)
+max_depth = -300.0           # absolute max depth (beyond this = instant death)
+pressure_damage_rate = 0.05  # damage per unit depth per second
+sub_health = 100.0           # submarine health
+reinforcement_level = 1.0    # multiplier (higher = less damage)
+
+sub_pos = [0.0, 0.0, -5.0]
+sub_vel = [0.0, 0.0, 0.0]
+sub_angle = 0.0
+base_speed = 7.0
+stealth = False
+hp_max = 100
+hp = 100
+shield_charges = 0
+
+
+# --------------- Currents (Wind Zones) -----------
+current_zones = [
+    (-12, -2,  -12, 12,  -18, 18,   2.0, 0.0,  0.0),
+    (  2,  12, -12, 12,  -18, 18,  -2.0, 0.0,  0.0),
+    (-18, 18,   8,  18,  -18, 18,   0.0,-2.0,  0.0),
+]
+
+# ---Speed Burst ( For Cheat Mode) ---
+speed_burst_active = False
+speed_burst_ends_at = 0
+speed_burst_duration = 3000
+speed_burst_multiplier = 3.0
+speed_burst_cooldown_timer = 5000
+last_speed_burst_time = 0
+
+# --------------- Torpedoes -----------------------
+torpedoes = []
+torpedo_speed = 25.0
+fire_cooldown_ms = 300
+boost_active = False
+boost_ends_at = 0
+last_fire_time = 0
+
+
+# --------------- Utility -------------------------
+
+
+def rand_pos_inside():
+    return [random.uniform(-20,20), random.uniform(-5,5), random.uniform(-20,20)]
+
+def distance3(a, b):
+    return ((a[0]-b[0])**2 + (a[1]-b[1])**2 + (a[2]-b[2])**2)**0.5
+def now_ms():
+    return glutGet(GLUT_ELAPSED_TIME)
+
+def clamp(v, a, b):
+    return max(a, min(b, v))
+
+def length3(v):
+    return math.sqrt(v[0]*v[0]+v[1]*v[1]+v[2]*v[2])
+
+def distance3(a, b):
+    return math.sqrt((a[0]-b[0])**2 + (a[1]-b[1])**2 + (a[2]-b[2])**2)
+
+def rand_pos_inside():
+    return [
+        random.uniform(-arena_size+1.5, arena_size-1.5),
+        random.uniform(-arena_size+1.5, arena_size-1.5),
+        random.uniform(-arena_size+1.5, arena_size-1.5),
+    ]
+
+def update_pressure(dt):
+    global sub_health
+
+    depth = sub_pos[1]  # assuming y-axis is depth
+
+    if depth < safe_depth:
+        # Calculate how far past safe depth
+        depth_excess = abs(depth - safe_depth)
+
+        # Damage increases with depth
+        damage = pressure_damage_rate * depth_excess * dt * (1.0 / reinforcement_level)
+
+        sub_health -= damage
+
+        if sub_health <= 0:
+            sub_health = 0
+            print("💥 Submarine crushed by water pressure!")
+            # Here you could trigger a "game over"
+
+
+# --------------- Collision Detection --------------
+def check_collision(pos1, r1, pos2, r2):
+    return distance3(pos1, pos2) < (r1 + r2)
+
+def handle_submarine_collisions():
+    global hp, shield_charges, score
+    sub_radius = 2.0
+
+    for o in obstacles:
+        if not o["alive"]: continue
+        if check_collision(sub_pos, sub_radius, [o["x"], o["y"], o["z"]], o["r"]):
+            if shield_charges > 0:
+                shield_charges -= 1
+                score += 5
+            else:
+                hp -= 15
+                if hp <= 0:
+                    hp = 0
+                    trigger_game_over()
+
+            dx = sub_pos[0] - o["x"]
+            dy = sub_pos[1] - o["y"]
+            dz = sub_pos[2] - o["z"]
+            dist = distance3(sub_pos, [o["x"], o["y"], o["z"]])
+            if dist > 0:
+                push_strength = 3.0
+                sub_pos[0] += (dx/dist) * push_strength
+                sub_pos[1] += (dy/dist) * push_strength
+                sub_pos[2] += (dz/dist) * push_strength
+
+                for _ in range(8):
+                    create_impact_bubble(o["x"], o["y"], o["z"])
+
+    if boss and boss["alive"]:
+        if check_collision(sub_pos, sub_radius, [boss["x"], boss["y"], boss["z"]], boss["r"]):
+            if shield_charges > 0:
+                shield_charges -= 1
+            else:
+                hp -= 25
+                if hp <= 0:
+                    hp = 0
+                    trigger_game_over()
+
+
+# --------------- Template-Compliant Rendering ----
+def draw_arena():
+    lighting = get_current_lighting()
+    glColor3f(lighting[0]*2, lighting[1]*2, lighting[2]*2)
+
+    glBegin(GL_LINES)
+    # Bottom square
+    glVertex3f(-arena_size,-arena_size,-arena_size); glVertex3f( arena_size,-arena_size,-arena_size)
+    glVertex3f( arena_size,-arena_size,-arena_size); glVertex3f( arena_size,-arena_size, arena_size)
+    glVertex3f( arena_size,-arena_size, arena_size); glVertex3f(-arena_size,-arena_size, arena_size)
+    glVertex3f(-arena_size,-arena_size, arena_size); glVertex3f(-arena_size,-arena_size,-arena_size)
+    # Top square
+    glVertex3f(-arena_size, arena_size,-arena_size); glVertex3f( arena_size, arena_size,-arena_size)
+    glVertex3f( arena_size, arena_size,-arena_size); glVertex3f( arena_size, arena_size, arena_size)
+    glVertex3f( arena_size, arena_size, arena_size); glVertex3f(-arena_size, arena_size, arena_size)
+    glVertex3f(-arena_size, arena_size, arena_size); glVertex3f(-arena_size, arena_size,-arena_size)
+    # Verticals
+    glVertex3f(-arena_size,-arena_size,-arena_size); glVertex3f(-arena_size, arena_size,-arena_size)
+    glVertex3f( arena_size,-arena_size,-arena_size); glVertex3f( arena_size, arena_size,-arena_size)
+    glVertex3f( arena_size,-arena_size, arena_size); glVertex3f( arena_size, arena_size, arena_size)
+    glVertex3f(-arena_size,-arena_size, arena_size); glVertex3f(-arena_size, arena_size, arena_size)
+    glEnd()
+
+def draw_submarine():
+    glPushMatrix()
+    glTranslatef(*sub_pos)
+    glRotatef(sub_angle, 0,1,0)
+
+    # Color based on state
+    if stealth:
+        glColor3f(0.3, 0.3, 0.6)
+    elif speed_burst_active:
+        glColor3f(1.0, 0.8, 0.0)
+    else:
+        glColor3f(0.2, 0.2, 0.3)
+
+    # Main hull
+    glPushMatrix()
+    glScalef(1.6, 1.2, 9.0)
+    glutSolidCube(1.0)
+    glPopMatrix()
+
+    # Nose cone
+    glColor3f(0.15, 0.15, 0.25)
+    glPushMatrix()
+    glTranslatef(0, 0, 4.8)
+    glScalef(0.8, 0.8, 0.6)
+    glutSolidCube(1.0)
+    glPopMatrix()
+
+    # Conning tower
+    glColor3f(0.25, 0.25, 0.35)
+    glPushMatrix()
+    glTranslatef(0, 1.0, 1.0)
+    glScalef(1.2, 0.8, 2.4)
+    glutSolidCube(1.0)
+    glPopMatrix()
+
+    # Periscope
+    glColor3f(0.4, 0.4, 0.4)
+    glPushMatrix()
+    glTranslatef(0, 1.6, 1.0)
+    glScalef(0.1, 0.4, 0.1)
+    glutSolidCube(1.0)
+    glPopMatrix()
+
+    # Diving planes
+    glColor3f(0.2, 0.3, 0.4)
+    glPushMatrix()
+    glTranslatef(-1.2, 0, 2.0)
+    glScalef(1.2, 0.1, 0.6)
+    glutSolidCube(1.0)
+    glPopMatrix()
+
+    glPushMatrix()
+    glTranslatef(1.2, 0, 2.0)
+    glScalef(1.2, 0.1, 0.6)
+    glutSolidCube(1.0)
+    glPopMatrix()
+
+    # Tail fins
+    glColor3f(0.15, 0.25, 0.35)
+    glPushMatrix()
+    glTranslatef(0, 0.8, -4.2)
+    glScalef(0.1, 1.2, 0.6)
+    glutSolidCube(1.0)
+    glPopMatrix()
+
+    glPushMatrix()
+    glTranslatef(-0.8, 0, -4.2)
+    glScalef(0.6, 0.1, 0.6)
+    glutSolidCube(1.0)
+    glPopMatrix()
+
+    glPushMatrix()
+    glTranslatef(0.8, 0, -4.2)
+    glScalef(0.6, 0.1, 0.6)
+    glutSolidCube(1.0)
+    glPopMatrix()
+
+    # Propeller
+    glColor3f(0.6, 0.5, 0.3)
+    glPushMatrix()
+    glTranslatef(0, 0, -4.8)
+    glRotatef(-90, 1, 0, 0)
+    gluCylinder(gluNewQuadric(), 0.8, 0.8, 0.2, 8, 1)
+    glPopMatrix()
+
+    glPopMatrix()
+
+def draw_torpedoes():
+    glColor3f(1,0.25,0.25)
+    for t in torpedoes:
+        glPushMatrix()
+        glTranslatef(t[0], t[1], t[2])
+        glRotatef(-90, 1, 0, 0)
+        gluCylinder(gluNewQuadric(), 0.11, 0.11, 0.9, 8, 1)
+        glPopMatrix()
+
+def draw_text(x, y, text, font=GLUT_BITMAP_HELVETICA_18):
+    glColor3f(1, 1, 1)
+
+    # Switch to projection mode and set orthographic projection
+    glMatrixMode(GL_PROJECTION)
+    glPushMatrix()
+    glLoadIdentity()
+    gluOrtho2D(0, window_width, 0, window_height)
+
+    # Switch back to modelview
+    glMatrixMode(GL_MODELVIEW)
+    glPushMatrix()
+    glLoadIdentity()
+
+    # ✅ Correct raster position
+    glRasterPos2f(float(x), float(y))
+
+    for ch in text:
+        glutBitmapCharacter(font, ord(ch))
+
+    # Restore matrices
+    glPopMatrix()
+    glMatrixMode(GL_PROJECTION)
+    glPopMatrix()
+    glMatrixMode(GL_MODELVIEW)
+
+# --------------- Speed Burst System ----------------
+def update_speed_burst():
+    global speed_burst_active
+    if speed_burst_active and now_ms() > speed_burst_ends_at:
+        speed_burst_active = False
+
+def activate_speed_burst():
+    global speed_burst_active, speed_burst_ends_at, last_speed_burst_time
+    current_time = now_ms()
+
+    if current_time - last_speed_burst_time > speed_burst_cooldown_timer:
+        speed_burst_active = True
+        speed_burst_ends_at = current_time + speed_burst_duration
+        last_speed_burst_time = current_time
+
+# --------------- Physics & Logic ------------------
+def apply_currents(dt):
+    for (xmin,xmax,ymin,ymax,zmin,zmax,ax,ay,az) in current_zones:
+        if xmin <= sub_pos[0] <= xmax and ymin <= sub_pos[1] <= ymax and zmin <= sub_pos[2] <= zmax:
+            sub_vel[0] += ax * dt
+            sub_vel[1] += ay * dt
+            sub_vel[2] += az * dt
+
+def update_submarine(dt):
+    global sub_angle
+
+    current_speed = base_speed
+    if stealth:
+        current_speed *= 0.5
+    if speed_burst_active:
+        current_speed *= speed_burst_multiplier
+
+    desired_vx = 0.0
+    desired_vy = 0.0
+    desired_vz = 0.0
+
+    radians = math.radians(sub_angle)
+
+    if keys.get(b'w', False) or keys.get(b'W', False):
+        desired_vx += current_speed * math.sin(radians)
+        desired_vz += current_speed * math.cos(radians)
+    if keys.get(b's', False) or keys.get(b'S', False):
+        desired_vx -= current_speed * 0.7 * math.sin(radians)
+        desired_vz -= current_speed * 0.7 * math.cos(radians)
+
+    if keys.get(b'a', False) or keys.get(b'A', False):
+        sub_angle -= 120.0 * dt
+    if keys.get(b'd', False) or keys.get(b'D', False):
+        sub_angle += 120.0 * dt
+
+    if keys.get(b'q', False) or keys.get(b'Q', False):
+        desired_vy += current_speed * 0.8
+    if keys.get(b'e', False) or keys.get(b'E', False):
+        desired_vy -= current_speed * 0.8
+
+    accel = 8.0
+    lerp_factor = min(1.0, accel * dt)
+    sub_vel[0] += (desired_vx - sub_vel[0]) * lerp_factor
+    sub_vel[1] += (desired_vy - sub_vel[1]) * lerp_factor
+    sub_vel[2] += (desired_vz - sub_vel[2]) * lerp_factor
+
+    apply_currents(dt)
+
+    sub_pos[0] += sub_vel[0] * dt
+    sub_pos[1] += sub_vel[1] * dt
+    sub_pos[2] += sub_vel[2] * dt
+
+    damping_per_second = 3.5
+    decay = max(0.0, 1.0 - damping_per_second * dt)
+    sub_vel[0] *= decay
+    sub_vel[1] *= decay
+    sub_vel[2] *= decay
+
+    for i in range(3):
+        if sub_pos[i] < -arena_size + 2.0:
+            sub_pos[i] = -arena_size + 2.0
+            sub_vel[i] = 0
+        elif sub_pos[i] > arena_size - 2.0:
+            sub_pos[i] = arena_size - 2.0
+            sub_vel[i] = 0
+
+def fire_torpedo():
+    global last_fire_time
+    current_time = now_ms()
+    cooldown = fire_cooldown_ms
+    if boost_active:
+        cooldown //= 3
+
+    if current_time - last_fire_time >= cooldown:
+        radians = math.radians(sub_angle)
+        vx = torpedo_speed * math.sin(radians)
+        vz = torpedo_speed * math.cos(radians)
+        start_x = sub_pos[0] + 5.0 * math.sin(radians)
+        start_z = sub_pos[2] + 5.0 * math.cos(radians)
+        torpedoes.append([start_x, sub_pos[1], start_z, vx, 0, vz])
+        last_fire_time = current_time
+
+def update_torpedoes(dt):
+    global score
+    for t in torpedoes[:]:
+        t[0] += t[3] * dt
+        t[1] += t[4] * dt
+        t[2] += t[5] * dt
+
+        out_of_bounds = (abs(t[0]) > arena_size or abs(t[1]) > arena_size or abs(t[2]) > arena_size)
+        if out_of_bounds:
+            torpedoes.remove(t)
+            continue
+
+        hit = False
+        for o in obstacles:
+            if not o["alive"]: continue
+            if distance3([t[0], t[1], t[2]], [o["x"], o["y"], o["z"]]) < (0.3 + o["r"]):
+                o["alive"] = False
+                o["respawn_timer"] = now_ms() + obstacle_respawn_delay
+                score += obstacle_points
+                torpedoes.remove(t)
+                hit = True
+                break
+
+        if hit: continue
+
+        if boss and boss["alive"]:
+            if distance3([t[0], t[1], t[2]], [boss["x"], boss["y"], boss["z"]]) < (0.3 + boss["r"]):
+                boss["hp"] -= 1
+                torpedoes.remove(t)
+                if boss["hp"] <= 0:
+                    boss["alive"] = False
+                    score += boss_points
+                break
+
+
