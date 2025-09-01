@@ -1,3 +1,9 @@
+Welcome to Submarine Escape 3D Game. You are on a mission to collect the treasure under the ocean with a submarine but lots of obstacles and big fishes attack you. The mission of the game is to collect the treasure which is located at a random point of the ocean within a given escape time. 
+
+You can finish the game instantly with a 0 point. But if you want to end up with a high score, kill as many enemies and obstacles as you can and collect the treasure.
+
+
+
 Submarine Escape 3D Game
 --------------------------
 Features:
